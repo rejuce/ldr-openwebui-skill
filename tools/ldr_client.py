@@ -190,7 +190,7 @@ class LDRClient:
 
         Long-running server-side operations (analyze_documents, search) can
         take several minutes, so POSTs use
-        ``long_timeout`` by default. Pass ``timeout=`` to override (e.g. a
+        ``long_timeout`` by default. Pass ``timeout=None`` to override (e.g. a
         short timeout for quick calls).
         """
         data = body if body is None else body

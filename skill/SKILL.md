@@ -41,17 +41,37 @@ export LDR_LONG_TIMEOUT=900   # seconds for long POSTs
 
 ## How to run
 
-The tool functions ship **inside this skill**, relative to this `SKILL.md`:
-`tools/ldr_tools.py` (auth in `tools/ldr_client.py`). Because the files are
-bundled with the skill, reference them by their **relative** `tools/` path and
-run every command from the skill directory (the directory that contains this
-`SKILL.md` and its `tools/` folder). Do not hardcode an absolute skill path.
+> ⚠️ **Never read, edit, or execute from the development repository.** The
+> `tools/` folder in the development repo where this skill was authored is this
+> skill's **source**, not what you run. Reading from, editing, or executing
+> against it would corrupt the source. The files you run are the **packaged**
+> skill, served to you by `read_skill_file`.
 
-Run the shell work through `run_command`:
+The tool functions ship **inside this skill** as `tools/ldr_client.py` (auth)
+and `tools/ldr_tools.py` (the 7 wrappers). In agent mode these are served to you
+by `read_skill_file`; they are **not** directly readable by `run_command`, and
+you are always the relay between them. To execute them safely:
 
-```bash
-python3 -c "import sys; sys.path.insert(0, 'tools'); import ldr_tools as t; print(t.<function>(...))"
-```
+1. **Read** the tool files via `read_skill_file` (or `view_skill`):
+   `tools/ldr_client.py` and `tools/ldr_tools.py`.
+2. **Write** them to a **temporary** working directory — never into the
+   development repo. Create it fresh each run:
+   ```bash
+   WORKDIR="$(mktemp -d)"
+   ```
+3. **Execute** from that temporary directory:
+   ```bash
+   cd "$WORKDIR"
+   python3 -c "import sys; sys.path.insert(0, '.'); import ldr_tools as t; print(t.<function>(...))"
+   ```
+4. **Clean up** afterwards:
+   ```bash
+   rm -rf "$WORKDIR"
+   ```
+
+Because `ldr_tools.py` imports `ldr_client.py` at the top, both files must be
+present in the temp directory together before executing — hence the
+write-then-run workflow (a single-file stdin pipe cannot satisfy the import).
 
 Each function returns a JSON string; parse it to inspect the result. Every
 function accepts an optional `client=` argument so one authenticated session
@@ -60,7 +80,6 @@ can be reused across calls.
 ## Quick reference
 
 Tool functions in `tools/ldr_tools.py` (each returns a JSON string):
-
 1. `quick_research(query)` — POST `/api/v1/quick_summary` → summary + findings + sources
 2. `detailed_research(query, model, search_engines, iterations, questions_per_iteration, strategy)` — POST `/api/start_research`, poll `GET /api/research/{id}/status`, fetch `GET /api/report/{id}`
 3. `analyze_documents(query, collection_name, max_results)` — POST `/api/v1/analyze_documents` (long-running)
@@ -87,6 +106,9 @@ Dependencies: `requests`, `beautifulsoup4` (`requirements.txt`).
 
 ## Pitfalls
 
+- **Never execute from or edit the development repo:** the repo's `tools/` folder
+  is this skill's source. Read the packaged files via `read_skill_file`, write
+  them to a temporary directory, execute from there, and clean up.
 - **Login rate limiter:** the login endpoint 429s if called too quickly. The
   tools authenticate **once** and reuse a single session, so normal use is
   fine — never add per-call logins.
@@ -94,18 +116,16 @@ Dependencies: `requests`, `beautifulsoup4` (`requirements.txt`).
   `detailed_research`, `search`) can overload the server, causing HTTP 500 or
   `still_running`. Give the server recovery time between heavy calls.
 - **Long timeouts:** long POSTs use `LDR_LONG_TIMEOUT` (default 900s).
-- **Self-contained paths:** run the tools from the skill directory using the
-  relative `tools/` path. Never hardcode an absolute skill path.
 - **No `generate_report`:** that job runs hours server-side and was intentionally
   dropped from the skill.
 
 ## Verification
 
 Run the in-process strategy list (no server load required) and confirm five
-strategies are returned:
+strategies are returned. Execute in a **temporary** directory (see "How to run"):
 
 ```bash
-python3 -c "import sys; sys.path.insert(0, 'tools'); import ldr_tools as t; print(t.list_strategies())"
+cd "$(mktemp -d)" && python3 -c "import sys; sys.path.insert(0, '.'); import ldr_tools as t; print(t.list_strategies())"
 ```
 
 A JSON string with a `strategies` list of five names — `source-based`,

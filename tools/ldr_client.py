@@ -22,13 +22,23 @@ Configuration comes from environment variables (never hardcoded):
 Usage:
     from ldr_client import LDRClient
     client = LDRClient()
-    client.login()
+    client.ensure_authenticated()
     data = client.post_json("/api/v1/quick_summary", {"query": "..."})
+
+Session persistence
+---------------------
+Each LLM tool call is a fresh process, so a module-level cached client does not
+survive between calls. To avoid re-authenticating on every call (which trips the
+login 429 rate limiter), the client persists the session cookie + CSRF token to
+a small JSON file on disk. On the next call the client restores the session and
+skips login entirely. Set ``session_file`` to control the location; the
+default is ``~/.local/state/ldr_openwebui/session.json``.
 """
 
 import os
 import re
 import time
+import json
 
 import requests
 from bs4 import BeautifulSoup
@@ -42,7 +52,8 @@ class LDRClient:
     """A small authenticated client for a running Local Deep Research server."""
 
     def __init__(self, base_url=None, username=None, password=None,
-                 timeout=120, long_timeout=None, max_retries=5, backoff_factor=0.5):
+                 timeout=120, long_timeout=None, max_retries=5, backoff_factor=0.5,
+                 session_file=None):
         self.base_url = (base_url or os.environ.get("LDR_BASE_URL")
                          or "http://192.168.0.3:1242").rstrip("/")
         self.username = username or os.environ.get("LDR_USERNAME")
@@ -53,14 +64,41 @@ class LDRClient:
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
 
+        if session_file is None:
+            session_file = os.environ.get(
+                "LDR_SESSION_FILE",
+                os.path.join(
+                    os.path.expanduser("~"),
+                    ".local",
+                    "state",
+                    "ldr_openwebui",
+                    "session.json",
+                ),
+            )
+        self.session_file = session_file
+
         self.session = requests.Session()
         self.csrf_token = None
 
     # ------------------------------------------------------------------ #
-    # Authentication
+    # Authentication (login once, persist, restore)
     # ------------------------------------------------------------------ #
+    def ensure_authenticated(self):
+        """Make sure the client is authenticated, without unnecessary logins.
+
+        If a previously saved session exists on disk and its cookie is still
+        present, it is restored and no login is performed. Otherwise the full
+        login handshake runs and the session is persisted for next time.
+
+        Returns True on success. Raises LDRAuthError on failure.
+        """
+        if self._restore_session():
+            return True
+        self.login()
+        return True
+
     def login(self):
-        """Perform the full login handshake and cache the CSRF token.
+        """Perform the full login handshake, cache the CSRF token, and persist.
 
         Returns True on success. Raises LDRAuthError on failure.
         """
@@ -97,6 +135,9 @@ class LDRClient:
 
         # 3. Fetch the API CSRF token and cache it for subsequent calls.
         self._refresh_csrf()
+
+        # 4. Persist the session so future (fresh-process) calls can reuse it.
+        self._save_session()
         return True
 
     def _refresh_csrf(self):
@@ -131,6 +172,78 @@ class LDRClient:
                 time.sleep(delay)
                 continue
             return resp
+
+    # ------------------------------------------------------------------ #
+    # Session persistence (cookies + CSRF token to a JSON file)
+    # ------------------------------------------------------------------ #
+    def _serialize_cookies(self):
+        """Return a JSON-serializable list of the session's cookies.
+
+        ``requests``' ``RequestsCookieJar`` has no ``save()`` method, so we
+        capture the fields we need manually.
+        """
+        return [
+            {
+                "name": c.name,
+                "value": c.value,
+                "domain": c.domain,
+                "path": c.path,
+                "secure": c.secure,
+                "expires": c.expires,
+            }
+            for c in self.session.cookies
+        ]
+
+    def _save_session(self):
+        """Persist the session cookie(s) and CSRF token to disk for reuse."""
+        try:
+            os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
+            with open(self.session_file, "w") as f:
+                json.dump(
+                    {
+                        "cookies": self._serialize_cookies(),
+                        "csrf": self.csrf_token,
+                    },
+                    f,
+                )
+        except OSError:
+            # Persistence is best-effort: if it fails we simply fall back to a
+            # fresh login on the next call rather than crashing the tool.
+            pass
+
+    def _restore_session(self):
+        """Load a saved session from disk if present.
+
+        Returns True if a usable session was restored (cookies + csrf loaded),
+        False otherwise. Never raises.
+        """
+        try:
+            if not os.path.exists(self.session_file):
+                return False
+            with open(self.session_file, "r") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+
+        cookies = data.get("cookies")
+        csrf = data.get("csrf")
+        if not cookies or not csrf:
+            return False
+
+        try:
+            for cd in cookies:
+                self.session.cookies.set(
+                    cd["name"],
+                    cd["value"],
+                    domain=cd.get("domain"),
+                    path=cd.get("path", "/"),
+                    secure=cd.get("secure", False),
+                    expires=cd.get("expires"),
+                )
+            self.csrf_token = csrf
+            return True
+        except Exception:
+            return False
 
     def _headers(self):
         headers = {"Accept": "application/json"}
@@ -190,10 +303,9 @@ class LDRClient:
 
         Long-running server-side operations (analyze_documents, search) can
         take several minutes, so POSTs use
-        ``long_timeout`` by default. Pass ``timeout=None`` to override (e.g. a
-        short timeout for quick calls).
+        ``long_timeout`` by default. Pass a positive timeout to override.
         """
-        data = body if body is None else body
+        data = body if body is not None else None
         resp = self._request_with_retry(
             "POST", path, json=data,
             headers={"Content-Type": "application/json"},

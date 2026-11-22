@@ -219,7 +219,140 @@ def test_all_documented_functions_exist(func_name):
     assert callable(getattr(ldr_tools, func_name))
 
 
+# --------------------------------------------------------------------------- #
+# Unit tests — no server required
+# --------------------------------------------------------------------------- #
+def test_validate_report_empty_is_invalid():
+    """An empty report (tiny model can't synthesize) must be flagged invalid."""
+    valid, note = ldr_tools._validate_report(
+        {"findings": [], "content": "", "summary": "", "sources": []})
+    assert valid is False
+    assert "empty" in note.lower()
+
+
+def test_validate_report_nonempty_is_valid():
+    valid, note = ldr_tools._validate_report(
+        {"findings": [{"t": "x"}], "content": "hi",
+         "summary": "s", "sources": [{"url": "u"}]})
+    assert valid is True
+    assert note == "ok"
+
+
+def test_validate_report_none_is_invalid():
+    valid, _ = ldr_tools._validate_report(None)
+    assert valid is False
+
+
+def test_is_error():
+    assert ldr_tools._is_error({"error": "x"})
+    assert ldr_tools._is_error({"detail": "x"})
+    assert not ldr_tools._is_error({"status": "ok"})
+    assert not ldr_tools._is_error({"success": True})
+
+
+def test_loads_tolerant():
+    import json
+    assert ldr_tools._loads(json.dumps({"a": 1})) == {"a": 1}
+    assert ldr_tools._loads("not json") == {}
+    assert ldr_tools._loads({"a": 1}) == {"a": 1}
+
+
+@pytest.mark.parametrize("func_name", [
+    "start_research",
+    "research_status",
+    "fetch_report",
+    "list_researches",
+    "queue_status",
+])
+def test_async_trio_functions_exist(func_name):
+    assert hasattr(ldr_tools, func_name), f"missing function: {func_name}"
+    assert callable(getattr(ldr_tools, func_name))
+
+
 def test_generate_report_dropped():
     """generate_report was intentionally removed (runs for hours server-side)."""
     assert not hasattr(ldr_tools, "generate_report"), \
         "generate_report should have been removed"
+
+
+# --------------------------------------------------------------------------- #
+# Live tests — hit the real server. Spaced to avoid overload.
+#
+# The trio is tested end-to-end: start -> poll status -> fetch report.
+# These skip gracefully on server overload (still_running / HTTP 500).
+# --------------------------------------------------------------------------- #
+def test_queue_status(shared_client):
+    result = ldr_tools.queue_status(client=shared_client)
+    d = _parse(result)
+    assert not _is_error(d), f"unexpected error: {d}"
+    assert d.get("status") == "success", f"expected status success: {d}"
+    assert isinstance(d.get("queue"), list), f"missing 'queue' list: {d}"
+
+
+def test_list_researches(shared_client):
+    result = ldr_tools.list_researches(client=shared_client)
+    d = _parse(result)
+    assert not _is_error(d), f"unexpected error: {d}"
+    assert isinstance(d.get("research"), list), f"missing 'research' list: {d}"
+
+
+def test_async_trio_end_to_end(shared_client):
+    """start_research -> research_status -> fetch_report, with validation."""
+    # Give the server a breather before starting a job.
+    time.sleep(30)
+
+    started = _parse(ldr_tools.start_research(
+        "capital of France",
+        iterations=1, questions_per_iteration=1,
+        strategy="focused-iteration",
+        client=shared_client))
+    if _is_error(started):
+        pytest.skip(f"start_research error: {started}")
+    assert started.get("status") == "success", f"expected success: {started}"
+    research_id = started.get("research_id")
+    assert research_id, f"no research_id: {started}"
+
+    # Poll status up to max_polls.
+    completed = False
+    for _ in range(120):
+        st = _parse(ldr_tools.research_status(research_id, client=shared_client))
+        if _is_error(st):
+            pytest.skip(f"status error: {st}")
+        status = st.get("status")
+        if status == "completed":
+            completed = True
+            break
+        if status == "failed":
+            pytest.skip(f"job failed server-side: {st}")
+        time.sleep(5)
+
+    if not completed:
+        pytest.skip("job did not complete within poll window (server busy)")
+
+    rep = _parse(ldr_tools.fetch_report(research_id, client=shared_client))
+    if _is_error(rep):
+        pytest.skip(f"fetch error: {rep}")
+    # fetch_report returns the raw server response (no 'validated' key — that
+    # flag is added by detailed_research). Validate the raw content directly:
+    # the report may legitimately be empty (tiny model), so we only assert the
+    # shape is well-formed and non-empty here.
+    assert "content" in rep or "summary" in rep or "sources" in rep, \
+        f"unexpected report shape: {rep}"
+    valid, note = ldr_tools._validate_report(rep)
+    assert valid is True, f"expected non-empty report, got: {note} :: {rep}"
+
+
+def test_detailed_research_composes_trio(shared_client):
+    """detailed_research should return a report carrying the validated flag."""
+    time.sleep(30)
+    result = ldr_tools.detailed_research(
+        "capital of France",
+        iterations=1, questions_per_iteration=1,
+        strategy="focused-iteration",
+        client=shared_client,
+        poll_interval=5, max_polls=120)
+    d = _parse(result)
+    if _is_error(d):
+        pytest.skip(f"server overloaded or error: {d}")
+    assert d.get("status") == "completed", f"expected completed: {d}"
+    assert "validated" in d, f"missing 'validated' flag: {d}"

@@ -4,7 +4,25 @@ Living log of steps taken. Updated after every step.
 
 ## Status: IN PROGRESS
 
-Last updated: 2026-11-21
+## Recent work (2026-11-22)
+
+- Added the non-blocking async research trio: `start_research()`,
+  `research_status()`, `fetch_report()`, plus `list_researches()`
+  (→ `/library/api/research-list`) and `queue_status()` (→ `/api/queue/status`).
+- Added `_validate_report()` — flags empty reports (tiny model returns
+  `status: completed` with empty findings) so the agent doesn't treat an
+  empty report as success.
+- Refactored `detailed_research()` to compose the trio and attach a
+  `validated` flag + `validation_note`.
+- Wired `_get_client()` to `ensure_authenticated()` so session persistence is
+  effective across processes.
+- Fixed a no-op bug in `LDRClient.post_json` (POST body was being dropped).
+- Updated SKILL.md with the trio, real endpoints, and the empty-report /
+  `progress=null` caveats.
+- Added unit + live tests; full suite passing (see below).
+
+
+Last updated: 2026-11-22
 
 ## Steps
 
@@ -71,6 +89,30 @@ Two independent reviewers inspected the code (no live-server execution):
 - Project overview, setup, usage, architecture.
 
 ### [DONE] Run 2 reviewer subagents (independent review per system prompt)
+
+### [DONE] Add async research trio + report validation
+- `start_research()` — POST `/api/start_research` → `{status:"success", research_id}` (non-blocking).
+- `research_status(research_id)` — GET `/api/research/{id}/status` → `{status: in_progress|completed|failed, progress:null}`.
+- `fetch_report(research_id)` — GET `/api/report/{id}` → `{content, summary, sources, findings}`.
+- `list_researches()` — GET `/library/api/research-list` (the real list endpoint).
+- `queue_status()` — GET `/api/queue/status` → `{status:"success", queue:[], total:N}`.
+- `_validate_report(data)` → `(is_valid, message)`; empty report = invalid.
+- `detailed_research()` now composes the trio and returns a `validated` flag.
+- `_get_client()` uses `ensure_authenticated()` (session persistence effective).
+- Fixed no-op bug in `LDRClient.post_json` (POST body was dropped).
+
+### [DONE] Live test suite — full run (28 passed, 1 skipped)
+Verified against live server `http://192.168.0.3:1242`:
+- Unit tests (no server): `_validate_report` empty/nonempty/None, `_is_error`,
+  `_loads` tolerant, trio function existence → all pass.
+- Fast live tests: `queue_status`, `list_researches` → pass (confirms correct
+  endpoints). `quick_research`, `list_strategies`, `list_search_engines`,
+  `get_configuration`, `all_documented_functions_exist`, `generate_report_dropped` → pass.
+- End-to-end async trio: `start_research` → poll status → `fetch_report` → **PASSED**
+  (server returned a full, non-empty report: "Paris is the capital of France",
+  20 sources, real content). This confirms session persistence across processes
+  AND that the tiny model CAN produce a full report on a good run.
+- `detailed_research_composes_trio` → **PASSED** (report carries `validated: true`).
 
 ### [PENDING] Report to Lead Engineer
 - Commit requires explicit user approval.

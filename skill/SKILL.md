@@ -81,7 +81,13 @@ can be reused across calls.
 
 Tool functions in `tools/ldr_tools.py` (each returns a JSON string):
 1. `quick_research(query)` — POST `/api/v1/quick_summary` → summary + findings + sources
-2. `detailed_research(query, model, search_engines, iterations, questions_per_iteration, strategy)` — POST `/api/start_research`, poll `GET /api/research/{id}/status`, fetch `GET /api/report/{id}`
+2. `detailed_research(query, model, search_engines, iterations, questions_per_iteration, strategy)` — compose the async trio below (start -> poll -> fetch)
+2b. **Async research trio** (non-blocking; use directly for long jobs):
+    - `start_research(query, ...)` — POST `/api/start_research` -> `{status:"success", research_id}` (returns immediately; job runs server-side)
+    - `research_status(research_id)` — GET `/api/research/{id}/status` -> `{status: in_progress|completed|failed, ...}`
+    - `fetch_report(research_id)` — GET `/api/report/{id}` -> `{content, summary, sources, findings, ...}`
+    - `list_researches()` — GET `/library/api/research-list` -> `{research:[{id,title,query}]}`
+    - `queue_status()` — GET `/api/queue/status` -> `{status:"success", queue:[], total:N}`
 3. `analyze_documents(query, collection_name, max_results)` — POST `/api/v1/analyze_documents` (long-running)
 4. `search(query)` — research pipeline, single iteration, `focused-iteration` → raw findings
 5. `list_search_engines()` — GET `/settings/api/available-search-engines` → engines + options + favorites
@@ -98,11 +104,12 @@ Dependencies: `requests`, `beautifulsoup4` (`requirements.txt`).
 1. Confirm the server is reachable (see Verification). If credentials are
    required, set the environment variables in Prerequisites first.
 2. For a fast answer, run `quick_research(query)`.
-3. For a thorough job, run `detailed_research(query, iterations=..., strategy=...)`; it polls to completion and returns the report.
-4. For raw search findings, run `search(query)` (single iteration).
-5. To summarize a document library, run `analyze_documents(query, collection_name=..., max_results=...)` — allow many minutes.
-6. To discover options, run `list_search_engines()` and `list_strategies()`.
-7. To inspect the server's live config, run `get_configuration()`.
+3. For a thorough job, run `detailed_research(query, iterations=..., strategy=...)`; it polls to completion and returns the report. For very long jobs you can drive the async trio directly — `start_research()` (fire-and-forget), then poll `research_status()` and finally `fetch_report()`.
+4. To check what has already run, run `list_researches()`; to check server load, run `queue_status()`.
+5. For raw search findings, run `search(query)` (single iteration).
+6. To summarize a document library, run `analyze_documents(query, collection_name=..., max_results=...)` — allow many minutes.
+7. To discover options, run `list_search_engines()` and `list_strategies()`.
+8. To inspect the server's live config, run `get_configuration()`.
 
 ## Pitfalls
 
@@ -116,6 +123,8 @@ Dependencies: `requests`, `beautifulsoup4` (`requirements.txt`).
   `detailed_research`, `search`) can overload the server, causing HTTP 500 or
   `still_running`. Give the server recovery time between heavy calls.
 - **Long timeouts:** long POSTs use `LDR_LONG_TIMEOUT` (default 900s).
+- **Empty report is NOT success:** the tiny server model (Ornith-1.5-35B-A3B-EXL3-4bpw) can return `status == "completed"` with **empty** `findings`/`content`/`summary`. `detailed_research` attaches a `validated` flag (and `validation_note`) — check it before treating a result as a success.
+- **`progress` is always null:** `research_status()` returns `progress: null`; there is no numeric progress percentage. Do not rely on it — poll `status` only.
 - **No `generate_report`:** that job runs hours server-side and was intentionally
   dropped from the skill.
 

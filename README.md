@@ -7,17 +7,29 @@ LDR is an open-source, self-hosted research agent (LlamaCPP backend). It searche
 sources, synthesizes findings with inline citations, and can summarize over a
 user's own document library.
 
-## The 7 tools
+## The tools (with an async research trio)
 
 | # | Function | Endpoint | Returns |
 |---|----------|----------|---------|
 | 1 | `quick_research(query)` | POST `/api/v1/quick_summary` | summary + findings + sources |
-| 2 | `detailed_research(query, ...)` | POST `/api/start_research` + poll | async research report |
-| 3 | `analyze_documents(query, collection_name, max_results)` | POST `/api/v1/analyze_documents` | summarize a doc library |
-| 4 | `search(query)` | research pipeline | raw search findings |
-| 5 | `list_search_engines()` | GET `/settings/api/available-search-engines` | engines + options + favorites |
-| 6 | `list_strategies()` | in-process (hardcoded) | 5 research strategies |
-| 7 | `get_configuration()` | GET `/research/api/settings/current-config` | server's current config |
+| 2 | `detailed_research(query, ...)` | compose the async trio below | async research report |
+| 2b | `start_research(query, ...)` | POST `/api/start_research` | `{status:"success", research_id}` (non-blocking) |
+| 2c | `research_status(research_id)` | GET `/api/research/{id}/status` | `{status: in_progress|completed|failed, progress:null}` |
+| 2d | `fetch_report(research_id)` | GET `/api/report/{id}` | `{content, summary, sources, findings}` |
+| 3 | `list_researches()` | GET `/library/api/research-list` | `{research:[{id,title,query}]}` |
+| 4 | `queue_status()` | GET `/api/queue/status` | `{status:"success", queue:[], total:N}` |
+| 5 | `analyze_documents(query, collection_name, max_results)` | POST `/api/v1/analyze_documents` | summarize a doc library |
+| 6 | `search(query)` | research pipeline | raw search findings |
+| 7 | `list_search_engines()` | GET `/settings/api/available-search-engines` | engines + options + favorites |
+| 8 | `list_strategies()` | in-process (hardcoded) | 5 research strategies |
+| 9 | `get_configuration()` | GET `/research/api/settings/current-config` | server's current config |
+
+**Async research trio.** For long jobs you can drive the trio directly instead
+of using `detailed_research`: `start_research()` fires the job and returns
+immediately; poll `research_status()`; then `fetch_report()` gets the result.
+`detailed_research()` composes this trio itself and attaches a `validated`
+flag so you know whether the report actually has content (the tiny server model
+can return `status: completed` with empty findings).
 
 Every function returns a **JSON string** suitable for an LLM tool call and
 accepts an optional `client=` argument so a single authenticated session can be
@@ -56,6 +68,13 @@ print(t.get_configuration())
 
 # Long-running (may take many minutes):
 print(t.detailed_research("History of coffee"))
+
+# Or drive the async trio directly for very long jobs:
+rid = _parse(t.start_research("History of coffee", iterations=3))
+while _parse(t.research_status(rid))["status"] == "in_progress":
+    time.sleep(10)
+print(t.fetch_report(rid))
+
 print(t.analyze_documents("Summarize research on coffee", collection_name="default", max_results=3))
 ```
 
@@ -122,14 +141,17 @@ ldr-openwebui-skill/
 
 ```bash
 pip install pytest
-cd tools
 LDR_BASE_URL="http://192.168.0.3:1242" LDR_USERNAME="<your-username>" LDR_PASSWORD="<your-password>" \
-    python3 -m pytest ../tests/test_ldr_tools.py -v
+    python3 -m pytest tests/test_ldr_tools.py -v
 ```
 
-Tests authenticate once, then call the fast tools. Long-running tools
-(`analyze_documents`, `search`) are exercised separately with generous spacing
-to avoid overloading the server.
+The suite includes unit tests (no server: report validation, error helpers,
+trio function existence) and live tests against the server. Live tests
+authenticate once, then exercise the fast tools, `queue_status`,
+`list_researches`, and the full async research trio end-to-end. The
+end-to-end trio test polls `research_status()` until completion, so it can take
+several minutes. Long-running tools are exercised with generous spacing to
+avoid overloading the server.
 
 ## License
 
